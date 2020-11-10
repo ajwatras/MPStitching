@@ -6,6 +6,7 @@ from skimage.segmentation import slic
 import csv
 from os import path
 import os
+import time
 
 global stitch
 stitch = sti.Stitcher()
@@ -44,12 +45,66 @@ def find_max_dim(src_imgs, dst_img, H_list):
     return (int(y_dim), int(x_dim), 3), coord_shift
 	
 
+def combineSegments(segments):
+	cc = 1
+	out = np.zeros(segments[0].shape)
+	for i in range(len(segments)):
+		vals = np.unique(segments[i])
+		for j in vals:
+			if j != 0:
+				ids = (segments[i] == j)
+				out[ids] = cc
+				cc = cc + 1
+
+	return out
+
+def performBlending2(images):
+	
+	# Add images together (as floats)
+	summed_img = np.zeros(images[0].shape).astype('float')
+	pixel_count = np.zeros(images[0].shape)
+	for i in range(len(images)):
+
+		summed_img = summed_img + images[i]
+		# Count Number of nonzero
+		pixel_count = pixel_count + (images[i] > 0).astype('float')
+
+	# set zeros to 1.
+	pixel_count = (pixel_count == 0) + pixel_count
+
+
+	# divide sum by nonzero
+	out = np.divide(summed_img, pixel_count)
+
+	return out.astype('uint8')
+
+def performBlending(images):
+	print("Performing Blending...")
+	m,n,_ = np.shape(images[0])
+	blended = np.zeros((m,n,3))
+	for i in range(m):
+		for j in range(n):
+			num_nonzero = 0
+			out_pixel = [0,0,0]
+			for k in range(len(images)):
+				if np.any(images[k][i,j,:] > 0):
+					num_nonzero += 1
+					out_pixel[0] += images[k][i,j,0]
+					out_pixel[1] += images[k][i,j,1]
+					out_pixel[2] += images[k][i,j,2]
+			if num_nonzero > 0:
+   			    blended[i,j,:] = np.array(out_pixel)/num_nonzero
+
+	return blended.astype('uint8')
+
+
 
 def blend_images(src_img, dst_img, segmentsL, H_list):
     # compute max pano size. 
     #pano_shape, dst_origin = find_max_dim(src_img, dst_img, H_list)
     #final_pano = np.zeros(pano_shape)
     #result = np.zeros(np.shape(src_img))
+
 
     # segment out images.
     n_seg = np.max(segmentsL) + 1
@@ -59,6 +114,7 @@ def blend_images(src_img, dst_img, segmentsL, H_list):
     x_dim = 0
     y_dim = 0
     max_shift = [0,0]
+
     for i in range(n_seg):
         seg_mask = (segmentsL == i).astype('uint8')
         seg_images[i] = src_img * np.repeat(seg_mask[:,:,np.newaxis],3,axis=2)
@@ -81,14 +137,6 @@ def blend_images(src_img, dst_img, segmentsL, H_list):
         	max_shift[0] = shifts[i][0]
         if shifts[i][1] > max_shift[1]:
         	max_shift[1] = shifts[i][1]
-        
-        pano = np.zeros((y_tmp, x_tmp, 3))
-        pano[shifts[i][0]:(shifts[i][0] + np.shape(result1)[0]), shifts[i][1]:(shifts[i][1] + np.shape(result1)[1]),:] = pano[shifts[i][0]:(shifts[i][0] + np.shape(result1)[0]), shifts[i][1]:(shifts[i][1] + np.shape(result1)[1]),:] + result1/2 
-        pano[shifts[i][0]:(shifts[i][0] + trans_shape[0]), shifts[i][1]:(shifts[i][1] + trans_shape[1]), :] = pano[shifts[i][0]:(shifts[i][0] + trans_shape[0]), shifts[i][1]:(shifts[i][1] + trans_shape[1]), :] + transformed_imgs[i]/2
-        #cv2.imshow("Pano"+str(i), pano.astype('uint8'))
-        #cv2.waitKey()
-
-
 
     final_pano = np.zeros((y_dim + max_shift[0], x_dim+max_shift[1], 3)).astype('float')
     for i in range(n_seg):
@@ -97,7 +145,28 @@ def blend_images(src_img, dst_img, segmentsL, H_list):
     	max_idx = [min_idx[0] + trans_shape[0], min_idx[1] + trans_shape[1]]
 
         final_pano[min_idx[0]:max_idx[0], min_idx[1]:max_idx[1], :] = final_pano[min_idx[0]:max_idx[0], min_idx[1]:max_idx[1], :] + transformed_imgs[i]/2
+    
     final_pano[min_idx[0]:min_idx[0] + np.shape(result1)[0], min_idx[1]:min_idx[1] + np.shape(result1)[1]] = final_pano[min_idx[0]:min_idx[0] + np.shape(result1)[0], min_idx[1]:min_idx[1] + np.shape(result1)[1]] + result1/2 
+    print("Final Pano Shape: " + str(final_pano.shape))
+
+
+    transformed_imgs.insert(0,dst_img)
+    shifts.insert(0,(0,0))
+
+    for i in range(n_seg+1):
+    	pre_pad = [max_shift[0] - shifts[i][0], max_shift[1] - shifts[i][1]]
+    	post_pad = [final_pano.shape[0] - (pre_pad[0] + transformed_imgs[i].shape[0]), final_pano.shape[1] - (pre_pad[1] + transformed_imgs[i].shape[1])]
+    	#print(pre_pad,post_pad,transformed_imgs[i].shape)
+    	transformed_imgs[i] = np.pad(transformed_imgs[i],((pre_pad[0],post_pad[0]),(pre_pad[1],post_pad[1]),(0,0)),'constant',constant_values=(0,0))
+    	print(transformed_imgs[i].shape)
+    	#cv2.imshow("trans",transformed_imgs[i])
+    	#cv2.waitKey(0)
+
+    
+    #final_pano = transformed_imgs[0]/2 + transformed_imgs[1]/2
+    t = time.time()
+    final_pano = performBlending2(transformed_imgs)
+    print("Blending Time: "  + str(time.time() - t))
 
     return final_pano.astype('uint8')
 
@@ -147,7 +216,7 @@ def computeHError(H_list, kp_list_L, kpsL, kpsR):
 
     return err 
 
-def main(l_img, r_img,segmentsL, frame_id, SHOW_PANO=False, SAVE_TXT=False):
+def main(l_img, r_img,segmentsL, frame_id, SHOW_PANO=False, SAVE_TXT=True, SAVE_SINGLE = False):
 
     # Crop out padding
     l_img = l_img[50:-50,330:-330,:]
@@ -219,6 +288,7 @@ def main(l_img, r_img,segmentsL, frame_id, SHOW_PANO=False, SAVE_TXT=False):
 
         l_point = kpsL[matches[k][0]].astype('int')                                                                
         l_seg = segmentsL[l_point[1],l_point[0]]
+        #print(l_seg)
         #print("Matches " + str(k) +": " + str(matches[k][0]))
         kp_list_L[l_seg][0].append(matches[k][0])
         kp_list_L[l_seg][1].append(matches[k][1])
@@ -257,7 +327,8 @@ def main(l_img, r_img,segmentsL, frame_id, SHOW_PANO=False, SAVE_TXT=False):
     print("Single planar SSE: " + str(sse_single))
     print("Multiplanar SSE: " + str(sse_multi))
     print("Improvement: " +str( (1 - sse_multi/sse_single) * 100) + "%")
-        
+
+    t = time.time()        
     # Compute Homographies
     H_list = [[]] * len(kp_list_L)
     for i in range(len(kp_list_L)):
@@ -268,7 +339,14 @@ def main(l_img, r_img,segmentsL, frame_id, SHOW_PANO=False, SAVE_TXT=False):
         if (len(H_list[i]) < 2):
         	H_list[i] = H_list[0]
 
+    pano_multi = blend_images(l_img, r_img, segmentsL, H_list)
+    mp_time = time.time() - t
 
+    t = time.time()
+    # Compare to panorama constructed using only background
+    result1, result2, mask1, mask2 = stitch.applyHomography(l_img, r_img, H_list[0])
+    pano_single = 0.5 * result1 * mask1 + 0.5 * result2 * mask2
+    sp_time = time.time() - t
 
     # Compute MSE of alignment
     sp_points = [[[],[]]]
@@ -276,18 +354,11 @@ def main(l_img, r_img,segmentsL, frame_id, SHOW_PANO=False, SAVE_TXT=False):
         sp_points[0][0].append(matches[i][0])
         sp_points[0][1].append(matches[i][1])
 
+    
     sp_err = computeHError([H], sp_points ,kpsL, kpsR)
     mp_err = computeHError(H_list, kp_list_L, kpsL, kpsR )
     print("Single planar H error: " + str(sp_err))
     print("Multi Planar H Error:  " + str(mp_err))
-
-
-
-    # Compare to panorama constructed using only background
-    result1, result2, mask1, mask2 = stitch.applyHomography(l_img, r_img, H_list[0])
-    pano_single = 0.5 * result1 * mask1 + 0.5 * result2 * mask2
-
-    pano_multi = blend_images(l_img, r_img, segmentsL, H_list)
 
     # Adjust output size to remove black outer edges.
     y_vals, x_vals,_ = np.nonzero(pano_multi)
@@ -309,7 +380,10 @@ def main(l_img, r_img,segmentsL, frame_id, SHOW_PANO=False, SAVE_TXT=False):
     if SAVE_TXT:
         with open(r'output.csv', 'a') as f:
             writer = csv.writer(f)
-            writer.writerow([frame_id,sse_single, sse_multi, sp_err, mp_err])
+            writer.writerow([frame_id,sse_single, sse_multi, sp_err, mp_err, sp_time, mp_time])
+
+    if SAVE_SINGLE: 
+    	cv2.imwrite('./output/single_pano.jpg', pano_single)
 
 
     return pano_multi
@@ -332,18 +406,18 @@ if __name__ == "__main__":
     #print(out1 + out2)
     #exit()
 
-    GT_SEG = True
+    GT_SEG = False
     # Initialize csv file
     if not path.exists('output.csv'):
-        fields = ["Frame ID", "SP Plane Error", "MP Plane Error", "SP Stitch Error", "MP Stitch Error"]
+        fields = ["Frame ID", "SP Plane Error", "MP Plane Error", "SP Stitch Error", "MP Stitch Error", "SP Timing","MP Timing"]
         with open(r'output.csv', 'w') as f:
             writer = csv.writer(f)
             writer.writerow(fields)
 
     # Load images from directoryd
-    im_dir = '/home/alex/scripts/python/Multiplanar-stitching/instrument_dataset_5/'
-    id_min = 0
-    id_max =100
+    im_dir = './instrument_dataset_6/'
+    id_min = 1
+    id_max = 1
     
     for im_idx in range(id_min,id_max+1):
         print("Processing Image " + str(im_idx) + "...")
@@ -352,17 +426,31 @@ if __name__ == "__main__":
         r_img = cv2.imread(im_dir + "right_frames/frame" + str(im_idx).zfill(3) + '.png') # destination image
 
         if GT_SEG:
-            left_label = cv2.imread(im_dir + "ground_truth/Maryland_Bipolar_Forceps_labels/frame" + str(im_idx).zfill(3) + '.png')/10
-            right_label = cv2.imread(im_dir + "ground_truth/Right_Prograsp_Forceps_labels/frame" + str(im_idx).zfill(3) + '.png')/5
-            other_label = cv2.imread(im_dir + "ground_truth/Other_labels/frame" + str(im_idx).zfill(3) + '.png') / 10
-            #left_label = cv2.imread(im_dir + "ground_truth/Maryland_Bipolar_Forceps_labels/frame" + str(im_idx).zfill(3) + '.png')/10
-            #right_label = cv2.imread(im_dir + "ground_truth/Right_Prograsp_Forceps_labels/frame" + str(im_idx).zfill(3) + '.png')/5
-            #other_label = cv2.imread(im_dir + "ground_truth/Other_labels/frame" + str(im_idx).zfill(3) + '.png') / 10
-            segmentsL = left_label + right_label + other_label
+            #left_label = cv2.imread(im_dir + "ground_truth/Maryland_Bipolar_Forceps_labels/frame" + str(im_idx).zfill(3) + '.png')
+            #right_label = cv2.imread(im_dir + "ground_truth/Right_Prograsp_Forceps_labels/frame" + str(im_idx).zfill(3) + '.png')
+            #other_label = cv2.imread(im_dir + "ground_truth/Other_labels/frame" + str(im_idx).zfill(3) + '.png')
+            
+            left_label = cv2.imread(im_dir + "ground_truth/Bipolar_Forceps_labels/frame" + str(im_idx).zfill(3) + '.png')
+            right_label = cv2.imread(im_dir + "ground_truth/Grasping_Retractor_labels/frame" + str(im_idx).zfill(3) + '.png')
+            other_label = cv2.imread(im_dir + "ground_truth/Vessel_Sealer_labels/frame" + str(im_idx).zfill(3) + '.png')
+
+
+            segmentsL = combineSegments([left_label,right_label,other_label]).astype('uint8')
+            #print(np.shape(segmentsL))
+            #print(np.shape(left_label + right_label + other_label))
+            #segmentsL = left_label + right_label + other_label
             segmentsL = segmentsL[:,:,0]
             segmentsL = segmentsL[50:-50,330:-330]
         else:
-            segmentsL = None
+            seg_dirs = os.listdir(im_dir+"ground_truth/")
+            label_list = [[]] * len(seg_dirs)
+            for i in range(len(seg_dirs)):
+            	label_list[i] = cv2.imread(im_dir + "ground_truth/" + seg_dirs[i] + "/frame" + str(im_idx).zfill(3) + '.png')
+            segmentsL = combineSegments(label_list).astype('uint8')
+            print(np.unique(segmentsL))
+            segmentsL = segmentsL[:,:,0]
+            segmentsL = segmentsL[50:-50,330:-330]
+           
 
         # Images from the MICCAI dataset have black padding, so we crop them to get rid of that. 
         #cv2.imshow("left",l_img)
